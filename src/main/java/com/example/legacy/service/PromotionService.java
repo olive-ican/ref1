@@ -7,7 +7,8 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Collections;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 @Service
@@ -19,6 +20,7 @@ public class PromotionService {
 
     @Cacheable("promotions")
     public List<PromotionResponseDto> getPromotions() {
-        return promotionRepository.findCurrentPromotions();
+        String today = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+        return promotionRepository.findCurrentPromotions(today);
     }
 }

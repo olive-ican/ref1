@@ -4,7 +4,6 @@ import lombok.Getter;
 import lombok.Setter;
 
 import javax.persistence.*;
-import java.time.LocalDate;
 
 @Entity
 @Table(name = "TB_PROMOTION")
@@ -25,8 +24,8 @@ public class Promotion {
     private Integer promoPrice;
 
     @Column(name = "START_DT")
-    private LocalDate startDt;
+    private String startDt;
 
     @Column(name = "END_DT")
-    private LocalDate endDt;
+    private String endDt;
 }

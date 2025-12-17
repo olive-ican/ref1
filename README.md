@@ -77,12 +77,77 @@
     *   `PROMO_ID` (BIGINT): 프로모션 ID (PK)
     *   `PROD_CD` (VARCHAR): 상품 코드 (FK, TB_PRODUCT 참조)
     *   `PROMO_PRICE` (DECIMAL): 프로모션 가격
-    *   `START_DT` (DATE): 프로모션 시작일
-    *   `END_DT` (DATE): 프로모션 종료일
+    *   `START_DT` (VARCHAR(8)): 프로모션 시작일
+    *   `END_DT` (VARCHAR(8)): 프로모션 종료일
 
 ## 튜닝 고려사항
+### [AS-IS 쿼리 및 문제점]
 
-`PromotionRepository`의 JPQL 쿼리는 `CURRENT_DATE`를 사용하여 `START_DT`와 `END_DT` 컬럼에 대한 인덱스 활용을 유도하도록 튜닝되었습니다. 이는 `TO_CHAR` 함수 사용으로 인한 인덱스 무효화를 방지하고, 인덱스 레인지 스캔을 통해 조회 성능을 개선하기 위함입니다.
+```sql
+SELECT ... FROM TB_PRODUCT A, TB_PROMOTION B ...
+WHERE TO_CHAR(SYSDATE, 'YYYYMMDD') BETWEEN START_DT AND END_DT
+```
 
-최적의 튜닝을 위해서는 실제 데이터베이스 환경에서의 테이블 레이아웃(컬럼 타입, 인덱스 유무)과 데이터 분포를 기반으로 한 실행 계획 분석이 필수적입니다.
+*   **문제 1**: Inline View 사용으로 인한 비효율 (옵티마이저가 뷰 병합을 못할 경우 전체 데이터 조인 후 필터링)
+*   **문제 2**: `TO_CHAR` 변환 등 DB 함수 의존 및 암시적 조인 사용으로 가독성 저하
 
+### [TO-BE 튜닝 포인트]
+
+1.  **바인딩 변수(:today) 사용**:
+    *   레거시 DB의 날짜 컬럼(`START_DT`, `END_DT`)이 `VARCHAR('YYYYMMDD')` 형식이므로, DB 함수 `TO_CHAR`를 사용하여 날짜를 변환하면 해당 컬럼에 생성된 인덱스를 활용할 수 없게 됩니다(Full Table Scan 발생). 이를 방지하기 위해 JPQL의 `CURRENT_DATE`(Date 타입) 대신 Java 애플리케이션 단에서 `LocalDate.now().format("yyyyMMdd")`와 같이 동일한 포맷의 `String` 파라미터(`:today`)를 생성하여 넘겨줍니다. 이로써 DB에서는 `String` vs `String` 비교가 이루어져 '타입 불일치로 인한 인덱스 미사용'을 방지하고 인덱스 레인지 스캔을 통해 성능을 향상시킵니다.
+2.  **명시적 JOIN (Standard Join)**:
+    *   JPA 엔티티 연관관계를 활용한 `JOIN pm.product p` 구문으로 변경하여 가독성을 높이고, 불필요한 카테시안 곱 발생 가능성을 차단하며 JPA 표준에 부합합니다.
+3.  **쿼리 구조 개선 (Flat Query)**:
+    *   서브쿼리를 제거하고 `WHERE` 절에서 날짜 범위를 직접 필터링하여, DB 옵티마이저가 날짜 인덱스를 통해 대상 범위를 먼저 좁히고(Driving) 조인을 수행하도록 유도합니다.
+
+### 오라클에서 변경 시, TO-BE 쿼리 예시
+```sql
+SELECT A.PROD_CD,
+       A.PROD_NM,
+       B.PROMO_PRICE,
+       B.START_DT,
+       B.END_DT
+FROM TB_PRODUCT A
+INNER JOIN TB_PROMOTION B
+    ON A.PROD_CD = B.PROD_CD
+WHERE A.USE_YN = 'Y'
+  AND TO_CHAR(SYSDATE, 'YYYYMMDD') BETWEEN B.START_DT AND B.END_DT;
+```
+
+### SQL과 Java 결합을 통한 예시
+```java
+@Repository
+public interface PromotionRepository extends JpaRepository<Promotion, Long> {
+
+    /*
+     * [AS-IS 쿼리 및 문제점]
+     * SELECT ... FROM TB_PRODUCT A, TB_PROMOTION B ...
+     * WHERE TO_CHAR(SYSDATE, 'YYYYMMDD') BETWEEN START_DT AND END_DT
+     * -> 문제 1: Inline View 사용으로 인한 비효율 (옵티마이저가 뷰 병합을 못할 경우 전체 데이터 조인 후 필터링)
+     * -> 문제 2: TO_CHAR 변환 등 DB 함수 의존 및 암시적 조인 사용으로 가독성 저하
+     *
+     * [TO-BE 튜닝 포인트]
+     * 1. 바인딩 변수(:today) 사용:
+     *    - 레거시 DB의 날짜 컬럼(START_DT, END_DT)이 VARCHAR('YYYYMMDD') 형식이므로,
+     *      JPQL의 CURRENT_DATE(Date 타입) 대신 Java에서 동일한 포맷의 String 파라미터(:today)를 넘겨
+     *      '타입 불일치로 인한 인덱스 미사용'을 방지하고 String vs String 비교를 통해 인덱스 작동을 유도합니다.
+     * 2. 명시적 JOIN (Standard Join):
+     *    - JPA 엔티티 연관관계를 활용한 `JOIN pm.product p` 구문으로 변경하여 가독성을 높이고,
+     *      불필요한 카테시안 곱 발생 가능성을 차단하며 JPA 표준에 부합합니다.
+     * 3. 쿼리 구조 개선 (Flat Query):
+     *    - 서브쿼리를 제거하고 WHERE 절에서 날짜 범위를 직접 필터링하여,
+     *      DB 옵티마이저가 날짜 인덱스를 통해 대상 범위를 먼저 좁히고(Driving) 조인을 수행하도록 유도합니다.
+     *
+     */
+    @Query("SELECT new com.example.legacy.dto.PromotionResponseDto(" +
+           "  p.prodCd, p.prodNm, pm.promoPrice, pm.startDt, pm.endDt) " +
+           "FROM Promotion pm " +
+           "JOIN pm.product p " +
+           "WHERE p.useYn = 'Y' " +
+           "AND pm.startDt <= :today " +
+           "AND pm.endDt >= :today")
+    List<PromotionResponseDto> findCurrentPromotions(@Param("today") String today);
+}
+```
+
+**최적의 튜닝을 위해서는 실제 데이터베이스 환경에서의 테이블 레이아웃(컬럼 타입, 인덱스 유무)과 데이터 분포를 기반으로 한 실행 계획 분석이 필수적입니다.**

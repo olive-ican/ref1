@@ -5,8 +5,6 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.time.LocalDate;
-
 @Data
 @Builder
 @NoArgsConstructor
@@ -15,6 +13,6 @@ public class PromotionResponseDto {
     private String prodCd;
     private String prodNm;
     private Integer promoPrice;
-    private LocalDate startDt;
-    private LocalDate endDt;
+    private String startDt;
+    private String endDt;
 }
